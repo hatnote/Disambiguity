@@ -22,7 +22,7 @@ DEFAULT_LIMIT = 100
 DEFAULT_CONC  = 100
 DEFAULT_PER_CALL = 4
 DEFAULT_TIMEOUT = 30
-DEFAULT_DB = 'dab_store'
+DEFAULT_DB = 'not yet implemented'
 CAT_CONC = 10
 ALL = 20000
 
@@ -172,7 +172,7 @@ def chunked_pimap(func, iterable, concurrency=DEFAULT_CONC, chunk_size=DEFAULT_P
 Page = namedtuple("Page", "title, req_title, pageid, revisionid, revisiontext, is_parsed, fetch_date")
 
 def find_article_history(text):
-    matches = re.findall(r'{{\s*ArticleHistory(.+?)}}', text, re.DOTALL)
+    matches = re.findall(r'{{\s*ArticleHistory(.+currentstatus.+?)}}', text, re.DOTALL)
     if not matches:
         return None
     else:
@@ -191,12 +191,12 @@ def tmpl_text_to_odict(text):
         k = k.strip()
         v = v.strip()
         if not k:
-            print 'blank key error'
-            import pdb;pdb.set_trace()
+            print 'blank key error', k
+            #import pdb;pdb.set_trace()
             continue
         if k in ret:
-            print 'duplicate key error'
-            import pdb;pdb.set_trace()
+            print 'duplicate key error', k
+            #import pdb;pdb.set_trace()
             continue
         ret[k] = v
     return ret
@@ -211,9 +211,13 @@ class HistoryAction(object):
         self.type = kwargs.pop('a_type')
         self.date = None
         date = kwargs.pop('date', None)
+        date = date.replace('(UTC)', '') # some date strings include timezone, but we'll ignore it since parse() can't handle it
         try:
             self.date = parse(date)
+            self.date_broken = False
         except ValueError:
+            self.date = datetime.utcfromtimestamp(0)
+            self.date_broken = True
             print 'Could not parse date string: ', date
 
         self.link = kwargs.pop('link', None)
@@ -222,9 +226,44 @@ class HistoryAction(object):
         
 
 import copy
+from datetime import datetime, timedelta
 action_name_re = re.compile('^action\d+$')
+
+class ArticleHistory(object):
+    def __init__(self, article_title, page_id, rev_id, actions=None, status=None):
+        self.article_title = article_title
+        self.page_id = page_id
+        self.rev_id = rev_id
+        self.status = status
+        self.actions = [] if actions is None else actions
+        self.chron_actions = sorted(self.actions, key=lambda x: x.date)
+        if self.actions:
+            self.last_updated = self.chron_actions[-1].date
+        else:
+            print 'Warning: no last updated time for', self.article_title
+            self.last_updated = datetime.utcfromtimestamp(0)
+
+    @classmethod
+    def from_page(cls, page):
+        ah_text = find_article_history(page.revisiontext)
+        if not ah_text:
+            raise ValueError('No ArticleHistory template found in unparsed wikitext of '+
+                             str(page.title))
+                             
+        tmpl_dict = tmpl_text_to_odict(ah_text)
+        actions = parse_article_history(tmpl_dict)
+        status = tmpl_dict.get('currentstatus')
+
+        return cls(page.title,
+                   page.pageid,
+                   page.revisionid,
+                   actions,
+                   status)
+
+    
+    
 def parse_article_history(hist_orig):
-    actions = OrderedDict()
+    actions = []
     hist_dict = copy.deepcopy(hist_orig)
     action_names = [ k for k in hist_dict.keys() if action_name_re.match(k) ]
     action_names.sort(key=lambda x: int(x[6:]))
@@ -235,13 +274,14 @@ def parse_article_history(hist_orig):
                                            for k,v in hist_dict.items()
                                            if k.startswith(a_name) ])
                                    )
-        actions[cur_action.num] = cur_action
+        actions.append(cur_action)
     return actions
 
 
 def main(**kwargs):
-    cat_mems = get_category("Featured articles that have appeared on the main page", 10)
-    page_ids = [c.pageid for c in cat_mems]
+    limit = kwargs.pop('limit')
+    cat_mems = get_category("Featured articles that have appeared on the main page", limit)
+    page_ids = [c.pageid for c in cat_mems if c.ns == 1]
     concurrency = kwargs.pop('concurrency')
     chunk_size = kwargs.pop('grouping')
     pages = []
@@ -255,32 +295,34 @@ def main(**kwargs):
         for p in cpages:
             am.update(1)
             pages.append(p)
-            ah_text = find_article_history(p.revisiontext)
-            tmpl_dict = tmpl_text_to_odict(ah_text)
-            ah = parse_article_history(tmpl_dict)
-            
-
+            try:
+                ah = ArticleHistory.from_page(p)
+            except ValueError as ve:
+                print ve
+                continue
+            histories.append(ah)
+        sorted_histories = sorted(histories, key=lambda x: x.last_updated)
+    print len(sorted_histories), "histories retrieved and parsed, but didn't do much else"
     import pdb;pdb.set_trace()
 
 
 
 def parse_args():
     parser = OptionParser()
-    parser.add_option("-d", "--database", dest="database", 
+    """parser.add_option("-d", "--database", dest="database", 
                       type="string", default=DEFAULT_DB,
-                      help="name of sqlite database used for saving Dabblets")
-
+                      help="name of sqlite database to save results")
     parser.add_option("-a", "--all", dest="get_all", 
                       action="store_true", default=False,
                       help="save as many Dabblets as we can find")
-
+                      """
     parser.add_option("-l", "--limit", dest="limit", 
                       type="int", default=DEFAULT_LIMIT,
-                      help="max number of articles to search for Dabblets (see -a)")
+                      help="max number of articles to search for ArticleHistory templates")
 
     parser.add_option("-C", "--category", dest="category", 
                       type="string", default=DEFAULT_CAT,
-                      help="category to search for Dabblets (recursive)")
+                      help="category to search for ArticleHistory templates")
 
     parser.add_option("-c", "--concurrency", dest="concurrency", 
                       type="int", default=DEFAULT_CONC,
